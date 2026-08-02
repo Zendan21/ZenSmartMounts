@@ -1,0 +1,10 @@
+## Interface: 30300
+## Title: Ebonhold Smart Mounts
+## Notes: Configurable ground and flying mount pools with smart random selection.
+## Author: Ryan
+## Version: 1.2.1
+## OptionalDeps: EbonCompletionist
+## SavedVariables: EbonholdSmartMountsDB
+
+EbonholdSmartMounts.lua
+Bindings.xml
