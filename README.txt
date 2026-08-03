@@ -1,12 +1,16 @@
-Ebonhold Smart Mounts 1.2.1
+Ebonhold Smart Mounts 1.3.2
 ================================
 
 For Project Ebonhold / World of Warcraft 3.3.5 (Interface 30300).
 
-Version 1.2.1 fixes the Weight button so it visibly cycles between Normal,
-Frequent and Rare. Version 1.2 simplified configuration to two pools. Every
-learned mount is classified as Ground or Flying and only the matching
-selection box is shown.
+Version 1.3.2 prepares secure summon actions before the click so changing
+mounts no longer requires a dead extra press. Version 1.3.1 allows the summon
+button to dismount immediately while flying.
+Version 1.3 removes full collection scans from the summon path and ignores the
+frequent companion state updates caused by ordinary summons. It also fixes
+Mount Journal type IDs being interpreted as legacy bit flags and removes an
+incorrect duplicate Bindings.xml load. The result is faster click response,
+stable shuffle bags, and correct Ground/Flying classification.
 Ahn'Qiraj mounts are excluded automatically. The old pool and filter cycling
 controls have been removed, and the window copy has been shortened to fit.
 
