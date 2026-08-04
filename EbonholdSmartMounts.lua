@@ -1,6 +1,6 @@
 local addonName = ...
 
-local ADDON_VERSION = "1.2.1"
+local ADDON_VERSION = "1.3.2"
 local PREFIX = "|cff58c6ffEbonhold Smart Mounts:|r "
 local DEFAULT_ICON = "Interface\\Icons\\Ability_Mount_RidingHorse"
 local SUMMON_MACRO_NAME = "EH Smart Mount"
@@ -50,14 +50,29 @@ local mounts = {}
 local filteredMounts = {}
 local scrollOffset = 0
 local shuffleBags = {}
+local selectionPoolCache = {}
+local preparedMounts = {}
 local lastMountKey = {}
 local macroUpdatePending
 local macroAutoAttempted
+local secureActionUpdatePending
+local companionCollectionReady
 local refreshSequenceFrame
 local uiReady
 local scanDetails = {}
 local RefreshPanel
 local RefreshRows
+local BuildPoolSignature
+local PrepareSecureSummonAction
+
+local function InvalidateSelectionCache()
+    selectionPoolCache = {}
+    shuffleBags = {}
+    preparedMounts = {}
+    if PrepareSecureSummonAction then
+        PrepareSecureSummonAction()
+    end
+end
 
 local function Print(message)
     DEFAULT_CHAT_FRAME:AddMessage(PREFIX .. tostring(message))
@@ -152,7 +167,7 @@ local function SetAssignment(mountKey, poolKey, enabled, manual)
     if not hasAssignment then
         EbonholdSmartMountsDB.assignments[key] = nil
     end
-    shuffleBags = {}
+    InvalidateSelectionCache()
 end
 
 local function GetWeight(mountKey)
@@ -169,7 +184,7 @@ local function SetWeight(mountKey, weight)
     else
         EbonholdSmartMountsDB.weights[tostring(mountKey)] = weight
     end
-    shuffleBags = {}
+    InvalidateSelectionCache()
 end
 
 local FLYING_WORDS = {
@@ -192,7 +207,17 @@ end
 
 local function MountTypeCanFly(mountType)
     if type(mountType) ~= "number" then return false end
-    return math.floor(mountType / 2) % 2 == 1
+
+    -- C_MountJournal returns MountType.db2 IDs, not bit flags. Ebonhold's
+    -- regular ground and flying mounts use 230 and 248 respectively. The
+    -- Companion API used by older 3.3.5 clients may instead return the
+    -- legacy 0-3 flags, so retain the bit check only for that small range.
+    if mountType == 248 then return true end
+    if mountType == 230 then return false end
+    if mountType >= 0 and mountType <= 3 then
+        return math.floor(mountType / 2) % 2 == 1
+    end
+    return false
 end
 
 local function GetMountCategory(mount)
@@ -216,16 +241,6 @@ local function ResetScanDetails()
         liveCount = 0,
         skippedCount = 0,
     }
-end
-
-local function MountKeyExists(mountKey)
-    local _, mount
-    for _, mount in ipairs(mounts) do
-        if mount.key == mountKey then
-            return true
-        end
-    end
-    return false
 end
 
 local function SafeCompanionCount(companionType)
@@ -255,7 +270,7 @@ local function ScanMountJournal()
     local ok, mountIDs = pcall(C_MountJournal.GetMountIDs)
     if not ok or type(mountIDs) ~= "table" then
         scanDetails.source = "Mount Journal unavailable"
-        return true
+        return false
     end
 
     scanDetails.source = "Mount Journal"
@@ -333,7 +348,7 @@ local function ScanCompanions()
     end
 end
 
-local function ScanEbonCompletionistCache()
+local function ScanEbonCompletionistCache(knownMountKeys)
     local cache = type(EbonCompletionistDB) == "table"
         and type(EbonCompletionistDB.account) == "table"
         and EbonCompletionistDB.account.mounts
@@ -344,7 +359,7 @@ local function ScanEbonCompletionistCache()
         if type(info) == "table" and info.name then
             local key = BuildMountKey(info.spellID, info.creatureID, info.name)
             scanDetails.cacheCount = scanDetails.cacheCount + 1
-            if not MountKeyExists(key) then
+            if not knownMountKeys[key] then
                 table.insert(mounts, {
                     key = key,
                     source = "account cache",
@@ -354,6 +369,7 @@ local function ScanEbonCompletionistCache()
                     creatureID = info.creatureID,
                     icon = info.icon or DEFAULT_ICON,
                 })
+                knownMountKeys[key] = true
             end
         end
     end
@@ -362,13 +378,20 @@ end
 local function ScanMounts()
     mounts = {}
     ResetScanDetails()
-    if not ScanMountJournal() then
+    if not ScanMountJournal() or scanDetails.liveCount == 0 then
         ScanCompanions()
     end
-    ScanEbonCompletionistCache()
+
+    local knownMountKeys = {}
+    local _, liveMount
+    for _, liveMount in ipairs(mounts) do
+        knownMountKeys[liveMount.key] = true
+    end
+    ScanEbonCompletionistCache(knownMountKeys)
 
     local _, mount
     for _, mount in ipairs(mounts) do
+        mount.sortName = Lower(mount.name)
         mount.category = GetMountCategory(mount)
         mount.excludedAQ = IsAQMount(mount)
         local assignment = GetAssignment(mount.key, false)
@@ -377,17 +400,36 @@ local function ScanMounts()
         elseif assignment then
             -- A row only belongs to its detected physical mount type. Clean
             -- up selections made by older versions that exposed both boxes.
+            -- Preserve selections whose category changes after correcting the
+            -- Mount Journal type-ID handling in 1.3.
             if mount.category == "ground" then
+                if assignment.flying and not assignment.ground then
+                    assignment.ground = true
+                end
                 assignment.flying = nil
             else
+                if assignment.ground and not assignment.flying then
+                    assignment.flying = true
+                end
                 assignment.ground = nil
             end
         end
     end
     table.sort(mounts, function(left, right)
-        return Lower(left.name) < Lower(right.name)
+        return left.sortName < right.sortName
     end)
+    InvalidateSelectionCache()
+
     return mounts
+end
+
+local function MarkCompanionCollectionReady()
+    -- Once login has exposed the collection, COMPANION_UPDATE only needs to
+    -- refresh the already prepared secure action. Learned/unlearned events
+    -- remain responsible for the comparatively expensive catalog rescan.
+    if scanDetails.liveCount > 0 then
+        companionCollectionReady = true
+    end
 end
 
 local function GetCurrentLocation()
@@ -421,7 +463,7 @@ local function GetSavedZoneOverride()
     return nil
 end
 
-local function GetAutomaticMode()
+local function GetAutomaticMode(ignoreModifiers)
     local canFly = type(IsFlyableArea) == "function" and IsFlyableArea() or false
     local reason = canFly and "area is flyable" or "area is not flyable"
 
@@ -449,12 +491,14 @@ local function GetAutomaticMode()
         reason = overrideReason
     end
 
-    if type(IsControlKeyDown) == "function" and IsControlKeyDown() then
-        canFly = true
-        reason = "Control override"
-    elseif type(IsShiftKeyDown) == "function" and IsShiftKeyDown() then
-        canFly = false
-        reason = "Shift override"
+    if not ignoreModifiers then
+        if type(IsControlKeyDown) == "function" and IsControlKeyDown() then
+            canFly = true
+            reason = "Control override"
+        elseif type(IsShiftKeyDown) == "function" and IsShiftKeyDown() then
+            canFly = false
+            reason = "Shift override"
+        end
     end
 
     return canFly and "flying" or "ground", reason
@@ -466,7 +510,9 @@ local function HasAssignment(mount, poolKey)
 end
 
 local function BuildPool(poolKey)
-    ScanMounts()
+    local cached = selectionPoolCache[poolKey]
+    if cached then return cached.mounts, cached.signature end
+
     local all = {}
     local ready = {}
     local _, mount
@@ -480,7 +526,10 @@ local function BuildPool(poolKey)
     end
     -- Prefer mounts confirmed by the live client. Cached mounts remain a
     -- fallback for Ebonhold characters whose account collection loads late.
-    return #ready > 0 and ready or all
+    local selected = #ready > 0 and ready or all
+    local signature = BuildPoolSignature and BuildPoolSignature(selected) or nil
+    selectionPoolCache[poolKey] = { mounts = selected, signature = signature }
+    return selected, signature
 end
 
 local function GetContextPool(requestedPool)
@@ -499,7 +548,7 @@ local function Shuffle(list)
     end
 end
 
-local function BuildPoolSignature(pool)
+BuildPoolSignature = function(pool)
     local parts = {}
     local _, mount
     for _, mount in ipairs(pool) do
@@ -541,9 +590,9 @@ local function PopAvoidingImmediateRepeat(list, poolKey)
     return table.remove(list)
 end
 
-local function PickShuffleMount(pool, poolKey)
+local function PickShuffleMount(pool, poolKey, signature)
     if #pool == 0 then return nil end
-    local signature = BuildPoolSignature(pool)
+    signature = signature or BuildPoolSignature(pool)
     local state = shuffleBags[poolKey]
     if not state or state.signature ~= signature
         or (#state.primary == 0 and #state.bonus == 0)
@@ -563,12 +612,12 @@ end
 
 local function ChooseMount(requestedPool)
     local poolKey, reason = GetContextPool(requestedPool)
-    local pool = BuildPool(poolKey)
+    local pool, signature = BuildPool(poolKey)
 
     if #pool == 0 then
         return nil, poolKey, reason
     end
-    return PickShuffleMount(pool, poolKey), poolKey, reason
+    return PickShuffleMount(pool, poolKey, signature), poolKey, reason
 end
 
 local function UpdateSummonButtonIcon(icon)
@@ -577,14 +626,85 @@ local function UpdateSummonButtonIcon(icon)
     end
 end
 
+local function GetSecureClickPool()
+    if type(IsControlKeyDown) == "function" and IsControlKeyDown() then
+        return "flying", "Control override"
+    elseif type(IsShiftKeyDown) == "function" and IsShiftKeyDown() then
+        return "ground", "Shift override"
+    end
+    return GetAutomaticMode(true)
+end
+
+local function GetPreparedMount(poolKey)
+    local prepared = preparedMounts[poolKey]
+    if prepared then return prepared end
+
+    local pool, signature = BuildPool(poolKey)
+    prepared = PickShuffleMount(pool, poolKey, signature)
+    preparedMounts[poolKey] = prepared
+    return prepared
+end
+
+local function MountMacroText(mount)
+    if not mount then return "" end
+    return "/cast " .. string.gsub(mount.name, "[\r\n]", " ")
+end
+
+local function SetSecureMacroText(attribute, value)
+    value = value or ""
+    if summonButton:GetAttribute(attribute) ~= value then
+        summonButton:SetAttribute(attribute, value)
+    end
+end
+
+PrepareSecureSummonAction = function()
+    if not summonButton then return false end
+    if type(InCombatLockdown) == "function" and InCombatLockdown() then
+        secureActionUpdatePending = true
+        return false
+    end
+    secureActionUpdatePending = nil
+
+    if type(IsMounted) == "function" and IsMounted() then
+        local dismount = "/dismount"
+        SetSecureMacroText("macrotext1", dismount)
+        SetSecureMacroText("shift-macrotext1", dismount)
+        SetSecureMacroText("ctrl-macrotext1", dismount)
+        SetSecureMacroText("ctrl-shift-macrotext1", dismount)
+        SetSecureMacroText("alt-macrotext1", dismount)
+        SetSecureMacroText("alt-shift-macrotext1", dismount)
+        SetSecureMacroText("alt-ctrl-macrotext1", dismount)
+        SetSecureMacroText("alt-ctrl-shift-macrotext1", dismount)
+        summonButton.preparedAction = "dismount"
+        return true
+    end
+
+    local groundMount = GetPreparedMount("ground")
+    local flyingMount = GetPreparedMount("flying")
+    local groundMacro = MountMacroText(groundMount)
+    local flyingMacro = MountMacroText(flyingMount)
+    local automaticPool = GetAutomaticMode(true)
+    local automaticMount = automaticPool == "flying" and flyingMount or groundMount
+    local automaticMacro = automaticPool == "flying" and flyingMacro or groundMacro
+
+    -- These are prepared outside the protected click. Modifier-specific
+    -- attributes keep Shift/Control overrides without mutating the action in
+    -- PreClick, which can otherwise leave the previous macro one click behind.
+    SetSecureMacroText("macrotext1", automaticMacro)
+    SetSecureMacroText("shift-macrotext1", groundMacro)
+    SetSecureMacroText("ctrl-macrotext1", flyingMacro)
+    SetSecureMacroText("ctrl-shift-macrotext1", flyingMacro)
+    SetSecureMacroText("alt-macrotext1", automaticMacro)
+    SetSecureMacroText("alt-shift-macrotext1", groundMacro)
+    SetSecureMacroText("alt-ctrl-macrotext1", flyingMacro)
+    SetSecureMacroText("alt-ctrl-shift-macrotext1", flyingMacro)
+    summonButton.preparedAction = "mount"
+    UpdateSummonButtonIcon(automaticMount and automaticMount.icon or DEFAULT_ICON)
+    return true
+end
+
 local function SummonSmartMount(requestedPool)
     if type(IsMounted) == "function" and IsMounted() then
-        if type(IsFlying) == "function" and IsFlying()
-            and not (type(IsAltKeyDown) == "function" and IsAltKeyDown())
-        then
-            Print("Already flying. Hold Alt while pressing the button to dismount in the air.")
-            return
-        end
         if type(Dismount) == "function" then Dismount() end
         return
     end
@@ -622,40 +742,6 @@ end
 
 function EbonholdSmartMounts_Summon()
     SummonSmartMount()
-end
-
-local function PrepareSecureSummon(self, mouseButton)
-    if mouseButton ~= "LeftButton" then return end
-    if type(InCombatLockdown) == "function" and InCombatLockdown() then
-        Print("You cannot mount while in combat.")
-        return
-    end
-
-    if type(IsMounted) == "function" and IsMounted() then
-        if type(IsFlying) == "function" and IsFlying()
-            and not (type(IsAltKeyDown) == "function" and IsAltKeyDown())
-        then
-            self:SetAttribute("macrotext1", "")
-            Print("Already flying. Hold Alt while pressing the button to dismount in the air.")
-            return
-        end
-        self:SetAttribute("macrotext1", "/dismount")
-        return
-    end
-
-    local mount, poolKey, reason = ChooseMount(nil)
-    if not mount then
-        self:SetAttribute("macrotext1", "")
-        Print("No " .. poolKey .. " mounts are selected and available.")
-        return
-    end
-
-    UpdateSummonButtonIcon(mount.icon)
-    local safeName = string.gsub(mount.name, "[\r\n]", " ")
-    self:SetAttribute("macrotext1", "/cast " .. safeName)
-    if EbonholdSmartMountsDB.debug then
-        Print("Prepared " .. mount.name .. " from " .. poolKey .. " (" .. reason .. ").")
-    end
 end
 
 local function GetSummonMacroIconIndex()
@@ -823,9 +909,32 @@ local function CreateSummonButton()
         self:StopMovingOrSizing()
         SaveSummonButtonPosition()
     end)
-    summonButton:SetScript("PreClick", PrepareSecureSummon)
-    summonButton:SetScript("PostClick", function(_, mouseButton)
-        if mouseButton == "RightButton" then TogglePanel() end
+    summonButton:SetScript("PreClick", function(self, mouseButton)
+        if mouseButton ~= "LeftButton" then return end
+        self.wasMountedBeforeClick = type(IsMounted) == "function" and IsMounted() or false
+        self.clickBlockedByCombat = type(InCombatLockdown) == "function" and InCombatLockdown() or false
+        if self.clickBlockedByCombat then
+            Print("You cannot mount while in combat.")
+        end
+    end)
+    summonButton:SetScript("PostClick", function(self, mouseButton)
+        if mouseButton == "RightButton" then
+            TogglePanel()
+        elseif mouseButton == "LeftButton" and not self.clickBlockedByCombat then
+            if not self.wasMountedBeforeClick then
+                local usedPool, reason = GetSecureClickPool()
+                local usedMount = preparedMounts[usedPool]
+                if usedMount then
+                    preparedMounts[usedPool] = nil
+                    if EbonholdSmartMountsDB.debug then
+                        Print("Selected " .. usedMount.name .. " from " .. usedPool .. " (" .. reason .. ").")
+                    end
+                else
+                    Print("No " .. usedPool .. " mounts are selected and available.")
+                end
+            end
+            PrepareSecureSummonAction()
+        end
     end)
     summonButton:SetScript("OnEnter", function(self)
         local poolKey, reason = GetContextPool(nil)
@@ -850,14 +959,11 @@ local function BuildFilteredMounts()
     local _, mount
     for _, mount in ipairs(mounts) do
         if not mount.excludedAQ
-            and (query == "" or string.find(Lower(mount.name), query, 1, true))
+            and (query == "" or string.find(mount.sortName, query, 1, true))
         then
             table.insert(filteredMounts, mount)
         end
     end
-    table.sort(filteredMounts, function(left, right)
-        return Lower(left.name) < Lower(right.name)
-    end)
 end
 
 local function UpdateScrollBar()
@@ -989,11 +1095,12 @@ local function CycleWeight(mount)
 end
 
 local function RunRefreshSequence()
-    if refreshSequenceFrame then
+    if not refreshSequenceFrame then
+        refreshSequenceFrame = CreateFrame("Frame")
+    else
         refreshSequenceFrame:SetScript("OnUpdate", nil)
     end
     RefreshPanel(true, true)
-    refreshSequenceFrame = CreateFrame("Frame")
     local elapsed, nextPass = 0, 1
     local passTimes = { 0.5, 1.5, 3.0 }
     refreshSequenceFrame:SetScript("OnUpdate", function(self, delta)
@@ -1253,6 +1360,7 @@ local function CreatePanel()
         else
             EbonholdSmartMountsDB.zoneOverrides[key] = nil
         end
+        PrepareSecureSummonAction()
         RefreshPanel(false, false)
     end)
 
@@ -1286,7 +1394,7 @@ local function CreatePanel()
     help:SetText("/ehm | /ehmsummon [ground/flying] | Right-click the mount button to configure")
 
     uiReady = true
-    panel:SetScript("OnShow", function() RefreshPanel(true, false) end)
+    panel:SetScript("OnShow", function() RefreshPanel(false, false) end)
     table.insert(UISpecialFrames, "EbonholdSmartMountsPanel")
     panel:Hide()
 end
@@ -1361,6 +1469,8 @@ eventFrame:SetScript("OnEvent", function(_, event, argument)
         Print("Loaded. Type /ehm to configure smart mount pools.")
     elseif event == "PLAYER_ENTERING_WORLD" then
         ScanMounts()
+        MarkCompanionCollectionReady()
+        PrepareSecureSummonAction()
         if not macroAutoAttempted then
             macroAutoAttempted = true
             EnsureSummonMacro(false)
@@ -1368,15 +1478,27 @@ eventFrame:SetScript("OnEvent", function(_, event, argument)
         if panel and panel:IsShown() then RefreshPanel(false, false) end
     elseif event == "PLAYER_REGEN_ENABLED" then
         if macroUpdatePending then EnsureSummonMacro(false) end
-    elseif event == "COMPANION_UPDATE" or event == "COMPANION_LEARNED"
-        or event == "COMPANION_UNLEARNED"
-    then
+        if secureActionUpdatePending then PrepareSecureSummonAction() end
+    elseif event == "COMPANION_UPDATE" then
+        -- During initial login the collection may not be populated yet. Once
+        -- ready, mount-state updates only refresh the prebuilt secure action.
+        if argument == nil or string.upper(tostring(argument)) == "MOUNT" then
+            if not companionCollectionReady then
+                ScanMounts()
+                MarkCompanionCollectionReady()
+                if panel and panel:IsShown() then RefreshPanel(false, false) end
+            end
+            PrepareSecureSummonAction()
+        end
+    elseif event == "COMPANION_LEARNED" or event == "COMPANION_UNLEARNED" then
         ScanMounts()
-        shuffleBags = {}
+        MarkCompanionCollectionReady()
+        PrepareSecureSummonAction()
         if panel and panel:IsShown() then RefreshPanel(false, false) end
     elseif event == "ZONE_CHANGED" or event == "ZONE_CHANGED_INDOORS"
         or event == "ZONE_CHANGED_NEW_AREA"
     then
+        PrepareSecureSummonAction()
         if panel and panel:IsShown() then RefreshPanel(false, false) end
     end
 end)

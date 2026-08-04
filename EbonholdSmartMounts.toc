@@ -2,9 +2,8 @@
 ## Title: Ebonhold Smart Mounts
 ## Notes: Configurable ground and flying mount pools with smart random selection.
 ## Author: Ryan
-## Version: 1.2.1
+## Version: 1.3.2
 ## OptionalDeps: EbonCompletionist
 ## SavedVariables: EbonholdSmartMountsDB
 
 EbonholdSmartMounts.lua
-Bindings.xml
