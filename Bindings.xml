@@ -1,5 +1,0 @@
-<Bindings>
-    <Binding name="EBONHOLDSMARTMOUNTS_SUMMON" header="EBONHOLDSMARTMOUNTS" category="ADDONS">
-        EbonholdSmartMounts_Summon()
-    </Binding>
-</Bindings>
