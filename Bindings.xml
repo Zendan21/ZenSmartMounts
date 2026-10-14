@@ -1,0 +1,5 @@
+<Bindings>
+    <Binding name="ZENSMARTMOUNTS_SUMMON" header="ZENSMARTMOUNTS" category="ADDONS">
+        ZenSmartMounts_Summon()
+    </Binding>
+</Bindings>

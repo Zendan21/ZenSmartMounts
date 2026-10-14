@@ -1,0 +1,21 @@
+## Interface: 30300
+## Title: ZenSmartMounts
+## Notes: Smart ground/flying mount selection with shared ZenStylingPack 1.1.0 appearance.
+## Author: Ryan
+## Version: 1.4.0
+## OptionalDeps: EbonCompletionist, EbonAPI
+## SavedVariables: ZenSmartMountsDB, EbonholdSmartMountsDB
+
+UI\Init.lua
+UI\Themes.lua
+UI\Media.lua
+UI\GlobalSync.lua
+UI\Effects.lua
+UI\Widgets\Panels.lua
+UI\Widgets\Buttons.lua
+UI\Widgets\Controls.lua
+UI\Widgets\StatusBar.lua
+UI\AppearancePanel.lua
+
+ZenSmartMounts.lua
+Bindings.xml
